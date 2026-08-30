@@ -1,0 +1,25 @@
+[package]
+name = "ai-usage-dock"
+version = "0.1.0"
+description = "A local Windows usage dock for Codex and Claude Code"
+authors = ["AI Usage Dock"]
+edition = "2021"
+
+[lib]
+name = "ai_usage_dock_lib"
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = true
