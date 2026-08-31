@@ -52,3 +52,13 @@ The browser development fallback renders safe fixture data so the layout can be 
 ## Native provider notes
 
 Codex is queried through two long-lived `codex app-server --stdio` processes. Claude uses the existing Claude Code OAuth credentials and its compatibility usage endpoint behind `ClaudeUsageProvider`. Provider failures preserve the last valid snapshot and never put provider credentials into React state or the state file.
+
+If Codex cannot connect, check the local CLI once in PowerShell:
+
+```powershell
+codex --version
+where.exe codex.cmd
+codex doctor
+```
+
+Then restart the dock and use **Connect** for the required Codex account. Codex 1 and Codex 2 have separate local logins.

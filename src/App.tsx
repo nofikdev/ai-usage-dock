@@ -3,7 +3,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import { createFixtureState, emptySnapshot } from "./lib/fixtures";
 import { compactStatusLabel, formatAge, formatReset, statusLabel, usageTone, windowLabel } from "./lib/formatters";
 import { invokeNative, isNativeRuntime, listenNative, startNativeDragging } from "./lib/tauri";
-import type { DockSettings, PanelState, ProviderId, ProviderStatus, UsageSnapshot, UsageWindow } from "./types";
+import type { DockSettings, PanelState, ProviderId, UsageSnapshot, UsageWindow } from "./types";
 
 const providerOrder: ProviderId[] = ["codex-account-1", "codex-account-2", "claude"];
 
@@ -95,9 +95,12 @@ function App() {
     setLoadError(null);
     try {
       if (isNativeRuntime) {
-        if (accountId === "claude") await invokeNative("reconnect_provider", { accountId });
-        else await invokeNative("connect_codex", { accountId });
-        setPanel(await invokeNative<PanelState>("refresh_usage"));
+        if (accountId === "claude") {
+          await invokeNative("reconnect_provider", { accountId });
+          setPanel(await invokeNative<PanelState>("refresh_usage"));
+        } else {
+          setPanel(await invokeNative<PanelState>("connect_codex", { accountId }));
+        }
       } else {
         setPanel((current) => ({
           ...current,
@@ -106,8 +109,8 @@ function App() {
           ),
         }));
       }
-    } catch {
-      setLoadError("Verbinden lukte niet. Controleer de lokale login en probeer opnieuw.");
+    } catch (error) {
+      setLoadError(nativeErrorMessage(error, "Verbinden lukte niet."));
     } finally {
       setActionAccount(null);
     }
@@ -221,7 +224,7 @@ function ProviderSection({
         </div>
       ) : (
         <div className="provider-empty">
-          <span>{providerMessage(snapshot.status)}</span>
+          <span>{providerMessage(snapshot)}</span>
           {isActionable ? (
             <button className="inline-button" type="button" onClick={() => void onConnect(snapshot.accountId)} disabled={isConnecting}>
               {isConnecting ? "Bezig…" : actionLabel}
@@ -354,13 +357,20 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (checked: b
   return <button className={`toggle ${checked ? "toggle-on" : ""}`} type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)}><span /></button>;
 }
 
-function providerMessage(status: ProviderStatus): string {
-  switch (status) {
+function providerMessage(snapshot: UsageSnapshot): string {
+  if (snapshot.error) return snapshot.error;
+  switch (snapshot.status) {
     case "auth_required": return "Login vereist voor actuele usage.";
     case "unavailable": return "Tijdelijk niet beschikbaar.";
     case "loading": return "Usage wordt opgehaald…";
     default: return "Geen usage window beschikbaar.";
   }
+}
+
+function nativeErrorMessage(error: unknown, fallback: string): string {
+  if (typeof error === "string" && error.trim()) return error;
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return fallback;
 }
 
 function RefreshIcon({ spinning = false }: { spinning?: boolean }) {

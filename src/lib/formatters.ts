@@ -69,7 +69,7 @@ export function compactStatusLabel(status: ProviderStatus): string {
     case "auth_required":
       return "login";
     case "unavailable":
-      return "offline";
+      return "probleem";
     case "loading":
       return "…";
   }

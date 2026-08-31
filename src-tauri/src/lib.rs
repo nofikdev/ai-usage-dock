@@ -2,7 +2,7 @@ use chrono::DateTime;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -22,6 +22,7 @@ use tauri_plugin_autostart::ManagerExt;
 const ACCOUNT_IDS: [&str; 3] = ["codex-account-1", "codex-account-2", "claude"];
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const BACKGROUND_REFRESH_SECONDS: u64 = 300;
+const CODEX_BACKOFF_SECONDS: [u64; 5] = [60, 120, 240, 480, 900];
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,6 +128,8 @@ struct UsageCoordinator {
     persisted: Mutex<PersistedState>,
     snapshots: Mutex<HashMap<String, UsageSnapshot>>,
     sessions: Mutex<HashMap<String, Arc<Mutex<CodexSessionSlot>>>>,
+    refreshing: Mutex<HashSet<String>>,
+    codex_backoff: Mutex<HashMap<String, BackoffState>>,
     claude_backoff: Mutex<BackoffState>,
 }
 
@@ -144,6 +147,7 @@ struct CodexSession {
     child: Child,
     stdin: ChildStdin,
     responses: Receiver<String>,
+    stderr: Arc<Mutex<String>>,
     next_id: u64,
 }
 
@@ -171,6 +175,8 @@ impl UsageCoordinator {
             persisted: Mutex::new(persisted),
             snapshots: Mutex::new(snapshots),
             sessions: Mutex::new(HashMap::new()),
+            refreshing: Mutex::new(HashSet::new()),
+            codex_backoff: Mutex::new(HashMap::new()),
             claude_backoff: Mutex::new(BackoffState::default()),
         })
     }
@@ -212,6 +218,21 @@ impl UsageCoordinator {
     }
 
     fn refresh_codex(&self, account_id: &str) -> bool {
+        if !self.begin_refresh(account_id) {
+            self.log_event(&format!("{} refresh skipped; already running", account_id));
+            return false;
+        }
+        let result = self.refresh_codex_inner(account_id);
+        self.end_refresh(account_id);
+        result
+    }
+
+    fn refresh_codex_inner(&self, account_id: &str) -> bool {
+        if let Some(seconds) = self.codex_backoff_remaining(account_id) {
+            self.set_failure(account_id, &format!("Tijdelijk beperkt · nieuwe poging over {}", format_retry_delay(seconds)), false);
+            return false;
+        }
+
         let slot = {
             let mut sessions = self.sessions.lock().expect("session map lock poisoned");
             sessions
@@ -237,26 +258,38 @@ impl UsageCoordinator {
 
             if let Some(session) = slot.session.as_mut() {
                 result = session.fetch_usage();
-                if result.is_ok() || attempt == 1 { break; }
+                let retryable = result.as_ref().err().map(|error| is_temporary_codex_error(error)).unwrap_or(false);
+                if result.is_ok() || !retryable || attempt == 1 { break; }
                 slot.session = None;
+                thread::sleep(Duration::from_secs(1_u64 << attempt));
             }
         }
 
         match result {
             Ok((identity, plan, rate_limit_reached_type, windows)) => {
+                self.reset_codex_backoff(account_id);
                 self.set_success(account_id, identity, plan, rate_limit_reached_type, windows);
                 self.log_event(&format!("{} fetch success", account_id));
                 true
             }
             Err(error) => {
-                self.set_failure(account_id, &friendly_codex_error(&error), is_auth_error(&error));
-                self.log_event(&format!("{} fetch failure", account_id));
+                self.record_codex_failure(account_id, &error);
                 false
             }
         }
     }
 
     fn refresh_claude(&self) -> bool {
+        if !self.begin_refresh("claude") {
+            self.log_event("claude refresh skipped; already running");
+            return false;
+        }
+        let result = self.refresh_claude_inner();
+        self.end_refresh("claude");
+        result
+    }
+
+    fn refresh_claude_inner(&self) -> bool {
         {
             let backoff = self.claude_backoff.lock().expect("backoff lock poisoned");
             if backoff.retry_at.map(|retry_at| Instant::now() < retry_at).unwrap_or(false) {
@@ -381,6 +414,37 @@ impl UsageCoordinator {
         current.error = Some(message.to_string());
     }
 
+    fn begin_refresh(&self, account_id: &str) -> bool {
+        self.refreshing.lock().map(|mut refreshing| refreshing.insert(account_id.to_string())).unwrap_or(false)
+    }
+
+    fn end_refresh(&self, account_id: &str) {
+        if let Ok(mut refreshing) = self.refreshing.lock() {
+            refreshing.remove(account_id);
+        }
+    }
+
+    fn finish_account_refresh(&self, success: bool) -> PanelState {
+        if success {
+            if let Ok(mut persisted) = self.persisted.lock() {
+                persisted.last_updated_at = Some(unix_now());
+                self.persist_snapshots_locked(&mut persisted);
+            }
+        }
+        self.panel_state()
+    }
+
+    fn record_codex_failure(&self, account_id: &str, error: &str) {
+        let message = friendly_codex_error(error);
+        if is_temporary_codex_error(error) {
+            let delay = self.register_codex_backoff(account_id);
+            self.set_failure(account_id, &format!("{} · nieuwe poging over {}", message, format_retry_delay(delay)), false);
+        } else {
+            self.set_failure(account_id, &message, is_auth_error(error));
+        }
+        self.log_event(&format!("{} fetch failure ({})", account_id, codex_error_category(error)));
+    }
+
     fn update_settings(&self, settings: DockSettings) -> PanelState {
         if let Ok(mut persisted) = self.persisted.lock() {
             persisted.settings = settings;
@@ -488,29 +552,63 @@ impl UsageCoordinator {
             *backoff = BackoffState::default();
         }
     }
+
+    fn codex_backoff_remaining(&self, account_id: &str) -> Option<u64> {
+        self.codex_backoff.lock().ok().and_then(|backoff| {
+            backoff.get(account_id).and_then(|state| state.retry_at).and_then(|retry_at| {
+                let remaining = retry_at.saturating_duration_since(Instant::now());
+                if remaining.is_zero() { None } else { Some(remaining.as_secs().max(1)) }
+            })
+        })
+    }
+
+    fn register_codex_backoff(&self, account_id: &str) -> u64 {
+        if let Ok(mut backoffs) = self.codex_backoff.lock() {
+            let state = backoffs.entry(account_id.to_string()).or_default();
+            let delay = CODEX_BACKOFF_SECONDS[state.failures.min(CODEX_BACKOFF_SECONDS.len() - 1)];
+            state.failures += 1;
+            state.retry_at = Some(Instant::now() + Duration::from_secs(delay));
+            return delay;
+        }
+        CODEX_BACKOFF_SECONDS[0]
+    }
+
+    fn reset_codex_backoff(&self, account_id: &str) {
+        if let Ok(mut backoffs) = self.codex_backoff.lock() {
+            backoffs.remove(account_id);
+        }
+    }
 }
 
 impl CodexSession {
     fn start(home: &Path) -> Result<Self, String> {
         let _ = fs::create_dir_all(home);
-        let mut child = codex_command(&["app-server", "--stdio"], home)
+        let mut child = (codex_command(&["app-server", "--stdio"], home)?)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
-            .map_err(|_| "Codex CLI niet gevonden".to_string())?;
+            .map_err(|error| format!("Codex app-server kon niet starten: {}", error))?;
         let stdout = child.stdout.take().ok_or_else(|| "Codex app-server heeft geen output".to_string())?;
         let stdin = child.stdin.take().ok_or_else(|| "Codex app-server heeft geen input".to_string())?;
+        let stderr = child.stderr.take().ok_or_else(|| "Codex app-server heeft geen foutuitvoer".to_string())?;
         let (sender, responses) = mpsc::channel();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().flatten() {
                 if sender.send(line).is_err() { break; }
             }
         });
+        let stderr_buffer = Arc::new(Mutex::new(String::new()));
+        let stderr_sink = Arc::clone(&stderr_buffer);
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().flatten() {
+                remember_diagnostic_line(&stderr_sink, &line);
+            }
+        });
 
-        let mut session = Self { child, stdin, responses, next_id: 1 };
+        let mut session = Self { child, stdin, responses, stderr: stderr_buffer, next_id: 1 };
         session.request("initialize", json!({
-            "clientInfo": { "name": "ai-usage-dock", "version": "0.1.3" },
+            "clientInfo": { "name": "ai-usage-dock", "version": "0.1.4" },
             "capabilities": {}
         }))?;
         session.notify("initialized", json!({}))?;
@@ -546,21 +644,26 @@ impl CodexSession {
         let deadline = Instant::now() + Duration::from_secs(12);
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() { return Err("Codex app-server reageert niet".to_string()); }
+            if remaining.is_zero() { return Err(self.with_stderr("Codex app-server reageert niet")); }
             let line = match self.responses.recv_timeout(remaining) {
                 Ok(line) => line,
-                Err(RecvTimeoutError::Timeout) => return Err("Codex app-server reageert niet".to_string()),
-                Err(RecvTimeoutError::Disconnected) => return Err("Codex app-server is gestopt".to_string()),
+                Err(RecvTimeoutError::Timeout) => return Err(self.with_stderr("Codex app-server reageert niet")),
+                Err(RecvTimeoutError::Disconnected) => return Err(self.with_stderr("Codex app-server is gestopt")),
             };
             let value: Value = match serde_json::from_str(&line) {
                 Ok(value) => value,
                 Err(_) => continue,
             };
             if value.get("id") == Some(&Value::from(id)) {
-                if let Some(error) = value.get("error") { return Err(error_message(error)); }
+                if let Some(error) = value.get("error") { return Err(self.with_stderr(&error_message(error))); }
                 return value.get("result").cloned().ok_or_else(|| "Codex antwoord bevat geen resultaat".to_string());
             }
         }
+    }
+
+    fn with_stderr(&self, message: &str) -> String {
+        let excerpt = self.stderr.lock().ok().map(|stderr| safe_process_excerpt(&stderr)).unwrap_or_default();
+        if excerpt.is_empty() { message.to_string() } else { format!("{}: {}", message, excerpt) }
     }
 }
 
@@ -581,18 +684,52 @@ fn refresh_usage(state: State<'_, AppState>) -> PanelState {
 }
 
 #[tauri::command]
-fn connect_codex(account_id: String, state: State<'_, AppState>) -> Result<(), String> {
+fn connect_codex(account_id: String, state: State<'_, AppState>) -> Result<PanelState, String> {
     if !["codex-account-1", "codex-account-2"].contains(&account_id.as_str()) {
         return Err("Onbekend Codex-account".to_string());
     }
+    if !state.coordinator.begin_refresh(&account_id) {
+        return Ok(state.coordinator.panel_state());
+    }
     let home = state.coordinator.codex_home(&account_id);
-    let status = codex_command(&["login"], &home)
+    let mut command = match codex_command(&["login"], &home) {
+        Ok(command) => command,
+        Err(error) => {
+            state.coordinator.record_codex_failure(&account_id, &error);
+            state.coordinator.end_refresh(&account_id);
+            return Ok(state.coordinator.panel_state());
+        }
+    };
+    let output = command
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|_| "Codex CLI niet gevonden".to_string())?;
-    if status.success() { Ok(()) } else { Err("Codex-login is niet afgerond".to_string()) }
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            state.coordinator.reset_codex_backoff(&account_id);
+            let refreshed = state.coordinator.refresh_codex_inner(&account_id);
+            state.coordinator.end_refresh(&account_id);
+            Ok(state.coordinator.finish_account_refresh(refreshed))
+        }
+        Ok(output) => {
+            let details = process_output_text(&output.stdout, &output.stderr);
+            let error = if details.is_empty() { "Codex-login is niet afgerond".to_string() } else { details };
+            state.coordinator.record_codex_failure(&account_id, &error);
+            state.coordinator.end_refresh(&account_id);
+            Ok(state.coordinator.panel_state())
+        }
+        Err(error) => {
+            let message = if error.kind() == std::io::ErrorKind::NotFound {
+                "Codex CLI niet gevonden".to_string()
+            } else {
+                "Codex-login kon niet starten".to_string()
+            };
+            state.coordinator.record_codex_failure(&account_id, &message);
+            state.coordinator.end_refresh(&account_id);
+            Ok(state.coordinator.panel_state())
+        }
+    }
 }
 
 #[tauri::command]
@@ -717,13 +854,96 @@ fn error_message(error: &Value) -> String {
 }
 
 fn friendly_codex_error(error: &str) -> String {
-    if error.contains("auth") || error.contains("login") || error.contains("unauthorized") { "Codex-login vereist".to_string() }
-    else if error.contains("niet gevonden") { "Codex CLI niet gevonden".to_string() }
-    else { "Tijdelijk niet beschikbaar".to_string() }
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("niet gevonden") || normalized.contains("not found") || normalized.contains("cannot find") {
+        "Codex CLI niet gevonden · controleer installatie en PATH".to_string()
+    } else if normalized.contains("approval_policy") || normalized.contains("untrusted") {
+        "Codex-configuratie blokkeert de login · voer codex doctor uit".to_string()
+    } else if is_auth_error(error) {
+        "Codex-login vereist of niet afgerond".to_string()
+    } else if normalized.contains("429") || normalized.contains("rate limit") {
+        "Codex tijdelijk beperkt".to_string()
+    } else if normalized.contains("kon niet starten") {
+        "Codex CLI kon niet starten · controleer installatie en rechten".to_string()
+    } else if normalized.contains("reageert niet") || normalized.contains("network") || normalized.contains("connection") || normalized.contains("timeout") {
+        "Codex-server tijdelijk niet bereikbaar".to_string()
+    } else if normalized.contains("onbekend rate-limit formaat") {
+        "Codex usage-formaat wordt niet herkend".to_string()
+    } else {
+        "Codex tijdelijk niet beschikbaar".to_string()
+    }
 }
 
 fn is_auth_error(error: &str) -> bool {
-    error.contains("auth") || error.contains("login") || error.contains("unauthorized")
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("auth") || normalized.contains("login") || normalized.contains("unauthorized")
+}
+
+fn is_temporary_codex_error(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    if is_auth_error(error)
+        || normalized.contains("niet gevonden")
+        || normalized.contains("not found")
+        || normalized.contains("cannot find")
+        || normalized.contains("kon niet starten")
+        || normalized.contains("approval_policy")
+        || normalized.contains("untrusted")
+        || normalized.contains("onbekend rate-limit formaat")
+    {
+        return false;
+    }
+    ["429", "rate limit", "reageert niet", "gestopt", "network", "connection", "timeout", "eof"]
+        .iter()
+        .any(|marker| normalized.contains(marker))
+}
+
+fn codex_error_category(error: &str) -> &'static str {
+    if is_auth_error(error) { "login" }
+    else if error.to_ascii_lowercase().contains("niet gevonden") { "cli" }
+    else if is_temporary_codex_error(error) { "temporary" }
+    else { "provider" }
+}
+
+fn format_retry_delay(seconds: u64) -> String {
+    if seconds >= 60 { format!("{}m", seconds.div_ceil(60)) } else { format!("{}s", seconds.max(1)) }
+}
+
+fn remember_diagnostic_line(buffer: &Arc<Mutex<String>>, line: &str) {
+    let Ok(mut buffer) = buffer.lock() else { return; };
+    if buffer.len() >= 4096 { return; }
+    let remaining = 4096 - buffer.len();
+    let clipped: String = line.chars().take(remaining.saturating_sub(1)).collect();
+    buffer.push_str(&clipped);
+    buffer.push('\n');
+}
+
+fn safe_process_excerpt(text: &str) -> String {
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let normalized = trimmed.to_ascii_lowercase();
+        if trimmed.is_empty()
+            || normalized.contains("http://")
+            || normalized.contains("https://")
+            || normalized.contains("token")
+            || normalized.contains("secret")
+            || normalized.contains("password")
+            || normalized.contains("authorization")
+            || normalized.contains("bearer")
+        {
+            continue;
+        }
+        lines.push(trimmed.chars().take(160).collect::<String>());
+        if lines.len() == 4 { break; }
+    }
+    lines.join(" | ").chars().take(500).collect()
+}
+
+fn process_output_text(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let combined = format!("{}\n{}", stdout, stderr);
+    combined.chars().take(8192).collect()
 }
 
 fn app_data_dir() -> PathBuf {
@@ -732,22 +952,72 @@ fn app_data_dir() -> PathBuf {
     PathBuf::from("AIUsageDock")
 }
 
-fn codex_command(args: &[&str], home: &Path) -> Command {
+fn resolve_codex_cli() -> Result<PathBuf, String> {
     #[cfg(windows)]
     {
-        let mut command = Command::new("cmd");
-        command.args(["/D", "/S", "/C", "codex.cmd"]);
-        command.args(args);
-        command.env("CODEX_HOME", home);
-        command.creation_flags(0x08000000);
-        command
+        let mut candidates = Vec::new();
+        let where_exe = env::var_os("WINDIR")
+            .map(|windir| PathBuf::from(windir).join("System32").join("where.exe"))
+            .filter(|path| path.is_file())
+            .unwrap_or_else(|| PathBuf::from("where.exe"));
+
+        for executable in ["codex.cmd", "codex.exe"] {
+            if let Ok(output) = Command::new(&where_exe).arg(executable).output() {
+                candidates.extend(String::from_utf8_lossy(&output.stdout).lines().map(PathBuf::from));
+            }
+        }
+        for variable in ["APPDATA", "LOCALAPPDATA"] {
+            if let Some(root) = env::var_os(variable) {
+                let npm = PathBuf::from(root).join("npm");
+                candidates.push(npm.join("codex.cmd"));
+                candidates.push(npm.join("codex.exe"));
+            }
+        }
+        if let Some(program_files) = env::var_os("ProgramFiles") {
+            let node = PathBuf::from(program_files).join("nodejs");
+            candidates.push(node.join("codex.cmd"));
+            candidates.push(node.join("codex.exe"));
+        }
+
+        for candidate in candidates {
+            if candidate.is_file() {
+                return candidate.canonicalize().or(Ok(candidate));
+            }
+        }
+        Err("Codex CLI niet gevonden · controleer installatie en PATH".to_string())
     }
     #[cfg(not(windows))]
     {
-        let mut command = Command::new("codex");
+        Ok(PathBuf::from("codex"))
+    }
+}
+
+fn codex_command(args: &[&str], home: &Path) -> Result<Command, String> {
+    let executable = resolve_codex_cli()?;
+    #[cfg(windows)]
+    {
+        let is_script = executable.extension().and_then(|extension| extension.to_str()).map(|extension| extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")).unwrap_or(false);
+        let mut command = if is_script {
+            let command_line = format!("\"{}\" {}", executable.display(), args.join(" "));
+            let shell = env::var_os("COMSPEC").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("cmd.exe"));
+            let mut command = Command::new(shell);
+            command.args(["/D", "/S", "/C"]).arg(command_line);
+            command
+        } else {
+            let mut command = Command::new(executable);
+            command.args(args);
+            command
+        };
+        command.env("CODEX_HOME", home);
+        command.creation_flags(0x08000000);
+        Ok(command)
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new(executable);
         command.args(args);
         command.env("CODEX_HOME", home);
-        command
+        Ok(command)
     }
 }
 
@@ -897,5 +1167,28 @@ mod tests {
     #[test]
     fn iso_reset_timestamps_are_normalized_for_claude() {
         assert_eq!(parse_timestamp(&json!("2026-08-31T16:42:00Z")), Some(1_788_194_520));
+    }
+
+    #[test]
+    fn codex_retries_only_transient_failures() {
+        assert!(is_temporary_codex_error("Codex app-server reageert niet"));
+        assert!(is_temporary_codex_error("HTTP 429 rate limit"));
+        assert!(!is_temporary_codex_error("Codex-login vereist"));
+        assert!(!is_temporary_codex_error("Codex CLI niet gevonden"));
+        assert!(!is_temporary_codex_error("approval_policy untrusted"));
+    }
+
+    #[test]
+    fn retry_delay_is_compact_and_bounded() {
+        assert_eq!(format_retry_delay(1), "1s");
+        assert_eq!(format_retry_delay(60), "1m");
+        assert_eq!(format_retry_delay(61), "2m");
+        assert_eq!(CODEX_BACKOFF_SECONDS, [60, 120, 240, 480, 900]);
+    }
+
+    #[test]
+    fn diagnostic_excerpt_omits_sensitive_lines() {
+        let output = safe_process_excerpt("connection reset\nhttps://example.test/login?token=secret\nAuthorization: Bearer secret\nretry later");
+        assert_eq!(output, "connection reset | retry later");
     }
 }
