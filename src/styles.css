@@ -23,10 +23,11 @@ body {
   margin: 0;
   min-width: 0;
   min-height: 100vh;
+  overflow: hidden;
   background: #f7f8f9;
 }
 
-#root { min-height: 100vh; }
+#root { width: 100%; min-height: 100vh; overflow: hidden; }
 
 button, input { font: inherit; }
 button { cursor: pointer; }
@@ -133,6 +134,7 @@ h1 { font-size: 15px; font-weight: 650; letter-spacing: -.01em; line-height: 1.2
 .provider-empty { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 10px; line-height: 1.3; }
 .stale-note { display: flex; align-items: center; gap: 5px; margin-top: 6px; color: var(--warning); font-size: 9px; }
 .provider-action { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; color: var(--warning); font-size: 9px; line-height: 1.25; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 .inline-button, .text-button, .back-button {
   padding: 0;
@@ -181,9 +183,41 @@ h1 { font-size: 15px; font-weight: 650; letter-spacing: -.01em; line-height: 1.2
   .usage-line { grid-template-columns: 23px minmax(30px, 1fr) 31px 40px; gap: 4px; }
 }
 
-@media (min-height: 420px) {
-  .provider-section { padding-top: 12px; padding-bottom: 11px; }
+@media (max-height: 270px) {
+  .topbar { min-height: 36px; padding-top: 4px; padding-bottom: 4px; }
+  .provider-list { padding-right: 8px; padding-left: 8px; }
+  .provider-section { padding-top: 5px; padding-bottom: 4px; }
+  .provider-heading { margin-bottom: 3px; }
+  .usage-window-list { gap: 2px; }
+  .usage-line { min-height: 12px; }
+  .usage-bar { height: 3px; }
+  .stale-note, .provider-action { display: none; }
 }
+
+@media (max-height: 205px) {
+  .topbar { min-height: 31px; padding: 3px 5px; }
+  .drag-handle { gap: 5px; }
+  .brand-mark { width: 12px; height: 12px; }
+  .brand-mark span { width: 2px; }
+  .brand-mark span:nth-child(1) { height: 6px; }
+  .brand-mark span:nth-child(2) { height: 9px; }
+  .brand-mark span:nth-child(3) { height: 12px; }
+  .drag-handle h1 { font-size: 10px; }
+  .top-actions { gap: 0; }
+  .icon-button { width: 22px; height: 22px; }
+  .icon { width: 14px; height: 14px; }
+  .provider-list { padding-right: 6px; padding-left: 6px; }
+  .provider-section { padding-top: 3px; padding-bottom: 3px; }
+  .provider-heading { gap: 4px; margin-bottom: 2px; }
+  .provider-name { font-size: 10px; }
+  .provider-status { font-size: 8px; }
+  .usage-window-list { gap: 1px; }
+  .usage-line { grid-template-columns: 21px minmax(24px, 1fr) 29px 36px; gap: 3px; min-height: 10px; }
+  .window-label, .remaining-value, .reset-time { font-size: 8px; }
+  .usage-bar { height: 3px; }
+  .notice { margin: 4px 8px 0; padding: 4px 6px; font-size: 9px; }
+}
+
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }

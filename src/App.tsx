@@ -202,7 +202,7 @@ function ProviderSection({
   const isConnecting = actionAccount === snapshot.accountId;
   const isActionable = snapshot.status === "auth_required" || snapshot.status === "unavailable";
   const statusText = compactStatusLabel(snapshot.status);
-  const details = [snapshot.plan, snapshot.accountIdentity, snapshot.rateLimitReachedType ? `limit: ${snapshot.rateLimitReachedType}` : null].filter(Boolean).join(" · ");
+  const details = [snapshot.plan, snapshot.accountIdentity, snapshot.rateLimitReachedType ? `limit: ${snapshot.rateLimitReachedType}` : null, snapshot.error].filter(Boolean).join(" · ");
   const statusDescription = snapshot.status === "healthy" ? "live" : statusLabel(snapshot.status);
 
   return (
@@ -231,10 +231,7 @@ function ProviderSection({
       )}
 
       {snapshot.windows.length > 0 && snapshot.status === "stale" ? (
-        <div className="stale-note"><span className="status-dot status-dot-warning" aria-hidden="true" /> Laatste geldige data · {formatAge(snapshot.fetchedAt)}</div>
-      ) : null}
-      {snapshot.windows.length > 0 && isActionable ? (
-        <div className="provider-action"><span>{snapshot.error ?? "Controleer de lokale login."}</span><button className="inline-button" type="button" onClick={() => void onConnect(snapshot.accountId)} disabled={isConnecting}>{isConnecting ? "Bezig…" : actionLabel}</button></div>
+        <span className="sr-only">Laatste geldige data: {formatAge(snapshot.fetchedAt)}</span>
       ) : null}
     </article>
   );

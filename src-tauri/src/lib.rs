@@ -8,6 +8,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -507,7 +509,7 @@ impl CodexSession {
 
         let mut session = Self { child, stdin, responses, next_id: 1 };
         session.request("initialize", json!({
-            "clientInfo": { "name": "ai-usage-dock", "version": "0.1.1" },
+            "clientInfo": { "name": "ai-usage-dock", "version": "0.1.2" },
             "capabilities": {}
         }))?;
         session.notify("initialized", json!({}))?;
@@ -584,6 +586,9 @@ fn connect_codex(account_id: String, state: State<'_, AppState>) -> Result<(), S
     }
     let home = state.coordinator.codex_home(&account_id);
     let status = codex_command(&["login"], &home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map_err(|_| "Codex CLI niet gevonden".to_string())?;
     if status.success() { Ok(()) } else { Err("Codex-login is niet afgerond".to_string()) }
@@ -733,6 +738,7 @@ fn codex_command(args: &[&str], home: &Path) -> Command {
         command.args(["/D", "/S", "/C", "codex.cmd"]);
         command.args(args);
         command.env("CODEX_HOME", home);
+        command.creation_flags(0x08000000);
         command
     }
     #[cfg(not(windows))]
