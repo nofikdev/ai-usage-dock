@@ -21,9 +21,12 @@ use tauri_plugin_autostart::ManagerExt;
 
 const ACCOUNT_IDS: [&str; 3] = ["codex-account-1", "codex-account-2", "claude"];
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const ANNOUNCEMENTS_FEED_URL: &str = "https://raw.githubusercontent.com/nofikdev/ai-usage-dock/main/feed/announcements.json";
 const BACKGROUND_REFRESH_SECONDS: u64 = 300;
+const ANNOUNCEMENTS_REFRESH_SECONDS: u64 = 900;
 const CODEX_REQUEST_TIMEOUT_SECONDS: u64 = 30;
 const CODEX_BACKOFF_SECONDS: [u64; 5] = [60, 120, 240, 480, 900];
+const ANNOUNCEMENTS_BACKOFF_SECONDS: [u64; 4] = [60, 300, 900, 3600];
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,11 +66,59 @@ pub struct DockSettings {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AnnouncementItem {
+    pub id: String,
+    pub published_at: Option<i64>,
+    pub text: String,
+    pub url: String,
+    pub category: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnouncementFeed {
+    pub status: String,
+    pub fetched_at: Option<i64>,
+    pub error: Option<String>,
+    pub items: Vec<AnnouncementItem>,
+    pub last_seen_id: Option<String>,
+}
+
+impl Default for AnnouncementFeed {
+    fn default() -> Self {
+        Self { status: "unavailable".to_string(), fetched_at: None, error: None, items: Vec::new(), last_seen_id: None }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteAnnouncementFeed {
+    #[serde(default)]
+    fetched_at: Option<String>,
+    #[serde(default)]
+    items: Vec<RemoteAnnouncementItem>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteAnnouncementItem {
+    id: String,
+    #[serde(default)]
+    published_at: Option<String>,
+    text: String,
+    url: String,
+    #[serde(default = "default_announcement_category")]
+    category: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PanelState {
     pub snapshots: Vec<UsageSnapshot>,
     pub settings: DockSettings,
     pub has_fetched: bool,
     pub last_updated_at: Option<i64>,
+    pub announcements: AnnouncementFeed,
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -94,6 +145,8 @@ struct PersistedState {
     window_size: Option<WindowSize>,
     settings: DockSettings,
     last_updated_at: Option<i64>,
+    #[serde(default)]
+    announcements: AnnouncementFeed,
 }
 
 impl Default for PersistedState {
@@ -104,6 +157,7 @@ impl Default for PersistedState {
             window_size: None,
             settings: DockSettings::default(),
             last_updated_at: None,
+            announcements: AnnouncementFeed::default(),
         }
     }
 }
@@ -132,6 +186,7 @@ struct UsageCoordinator {
     refreshing: Mutex<HashSet<String>>,
     codex_backoff: Mutex<HashMap<String, BackoffState>>,
     claude_backoff: Mutex<BackoffState>,
+    announcements_backoff: Mutex<BackoffState>,
 }
 
 #[derive(Default)]
@@ -179,6 +234,7 @@ impl UsageCoordinator {
             refreshing: Mutex::new(HashSet::new()),
             codex_backoff: Mutex::new(HashMap::new()),
             claude_backoff: Mutex::new(BackoffState::default()),
+            announcements_backoff: Mutex::new(BackoffState::default()),
         })
     }
 
@@ -190,6 +246,7 @@ impl UsageCoordinator {
             settings: persisted.settings.clone(),
             has_fetched: persisted.last_updated_at.is_some(),
             last_updated_at: persisted.last_updated_at,
+            announcements: persisted.announcements.clone(),
         }
     }
 
@@ -215,6 +272,95 @@ impl UsageCoordinator {
             }
         }
 
+        self.panel_state()
+    }
+
+    fn refresh_announcements(&self) -> bool {
+        if !self.begin_refresh("announcements") {
+            self.log_event("announcements refresh skipped; already running");
+            return false;
+        }
+        let result = self.refresh_announcements_inner();
+        self.end_refresh("announcements");
+        result
+    }
+
+    fn refresh_announcements_inner(&self) -> bool {
+        if let Some(seconds) = self.announcements_backoff_remaining() {
+            self.set_announcements_failure(&format!("Tijdelijk niet beschikbaar · nieuwe poging over {}", format_retry_delay(seconds)), true);
+            return false;
+        }
+
+        let client = match Client::builder().timeout(Duration::from_secs(10)).build() {
+            Ok(client) => client,
+            Err(_) => {
+                self.register_announcements_backoff();
+                self.set_announcements_failure("Aankondigingen tijdelijk niet beschikbaar", true);
+                return false;
+            }
+        };
+        let response = match client.get(ANNOUNCEMENTS_FEED_URL).header("accept", "application/json").send() {
+            Ok(response) => response,
+            Err(_) => {
+                self.register_announcements_backoff();
+                self.set_announcements_failure("Aankondigingen offline · cache behouden", true);
+                self.log_event("announcements network failure; backoff active");
+                return false;
+            }
+        };
+        let status = response.status().as_u16();
+        if status == 429 || (500..=599).contains(&status) {
+            self.register_announcements_backoff();
+            self.set_announcements_failure(&format!("Aankondigingen tijdelijk niet beschikbaar · HTTP {}", status), true);
+            self.log_event(&format!("announcements HTTP {}; backoff active", status));
+            return false;
+        }
+        if !response.status().is_success() {
+            self.set_announcements_failure("Aankondigingen-feed kan niet worden geladen", false);
+            self.log_event(&format!("announcements HTTP {}", status));
+            return false;
+        }
+
+        let payload: RemoteAnnouncementFeed = match response.json() {
+            Ok(payload) => payload,
+            Err(_) => {
+                self.set_announcements_failure("Aankondigingen-feed heeft een ongeldig formaat", false);
+                return false;
+            }
+        };
+        let items = payload.items.into_iter().filter_map(normalize_announcement).take(20).collect::<Vec<_>>();
+        let fetched_at = payload.fetched_at.as_deref().and_then(|value| parse_timestamp(&Value::String(value.to_string()))).or_else(|| Some(unix_now()));
+        self.reset_announcements_backoff();
+        self.set_announcements_success(items, fetched_at);
+        self.log_event("announcements fetch success");
+        true
+    }
+
+    fn set_announcements_success(&self, items: Vec<AnnouncementItem>, fetched_at: Option<i64>) {
+        if let Ok(mut persisted) = self.persisted.lock() {
+            persisted.announcements.status = "healthy".to_string();
+            persisted.announcements.fetched_at = fetched_at;
+            persisted.announcements.error = None;
+            persisted.announcements.items = items;
+            self.persist_snapshots_locked(&mut persisted);
+        }
+    }
+
+    fn set_announcements_failure(&self, message: &str, retryable: bool) {
+        if let Ok(mut persisted) = self.persisted.lock() {
+            persisted.announcements.status = if persisted.announcements.items.is_empty() { "unavailable" } else { "stale" }.to_string();
+            persisted.announcements.error = Some(if retryable { message.to_string() } else { "Aankondigingen niet beschikbaar".to_string() });
+            self.persist_snapshots_locked(&mut persisted);
+        }
+    }
+
+    fn mark_announcements_read(&self, id: String) -> PanelState {
+        if let Ok(mut persisted) = self.persisted.lock() {
+            if persisted.announcements.items.iter().any(|item| item.id == id) {
+                persisted.announcements.last_seen_id = Some(id);
+                self.persist_snapshots_locked(&mut persisted);
+            }
+        }
         self.panel_state()
     }
 
@@ -562,6 +708,29 @@ impl UsageCoordinator {
         }
     }
 
+    fn announcements_backoff_remaining(&self) -> Option<u64> {
+        self.announcements_backoff.lock().ok().and_then(|state| state.retry_at).and_then(|retry_at| {
+            let remaining = retry_at.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { None } else { Some(remaining.as_secs().max(1)) }
+        })
+    }
+
+    fn register_announcements_backoff(&self) -> u64 {
+        if let Ok(mut state) = self.announcements_backoff.lock() {
+            let delay = ANNOUNCEMENTS_BACKOFF_SECONDS[state.failures.min(ANNOUNCEMENTS_BACKOFF_SECONDS.len() - 1)];
+            state.failures += 1;
+            state.retry_at = Some(Instant::now() + Duration::from_secs(delay));
+            return delay;
+        }
+        ANNOUNCEMENTS_BACKOFF_SECONDS[0]
+    }
+
+    fn reset_announcements_backoff(&self) {
+        if let Ok(mut state) = self.announcements_backoff.lock() {
+            *state = BackoffState::default();
+        }
+    }
+
     fn codex_backoff_remaining(&self, account_id: &str) -> Option<u64> {
         self.codex_backoff.lock().ok().and_then(|backoff| {
             backoff.get(account_id).and_then(|state| state.retry_at).and_then(|retry_at| {
@@ -694,6 +863,17 @@ fn refresh_usage(state: State<'_, AppState>) -> PanelState {
 }
 
 #[tauri::command]
+fn refresh_announcements(state: State<'_, AppState>) -> PanelState {
+    state.coordinator.refresh_announcements();
+    state.coordinator.panel_state()
+}
+
+#[tauri::command]
+fn mark_announcements_read(id: String, state: State<'_, AppState>) -> PanelState {
+    state.coordinator.mark_announcements_read(id)
+}
+
+#[tauri::command]
 fn connect_codex(account_id: String, state: State<'_, AppState>) -> Result<PanelState, String> {
     if !["codex-account-1", "codex-account-2"].contains(&account_id.as_str()) {
         return Err("Onbekend Codex-account".to_string());
@@ -774,6 +954,24 @@ fn initial_snapshot(account_id: &str, settings: &DockSettings) -> UsageSnapshot 
         error: None,
         windows: Vec::new(),
     }
+}
+
+fn default_announcement_category() -> String {
+    "announcement".to_string()
+}
+
+fn normalize_announcement(item: RemoteAnnouncementItem) -> Option<AnnouncementItem> {
+    let id = item.id.trim().to_string();
+    let text = item.text.trim().to_string();
+    let url = item.url.trim().to_string();
+    if id.is_empty() || text.is_empty() || !url.starts_with("https://x.com/") { return None; }
+    Some(AnnouncementItem {
+        id,
+        published_at: item.published_at.as_deref().and_then(|value| parse_timestamp(&Value::String(value.to_string()))),
+        text: text.chars().take(600).collect(),
+        url,
+        category: item.category.trim().chars().take(40).collect(),
+    })
 }
 
 fn parse_codex_windows(value: &Value) -> Vec<UsageWindow> {
@@ -956,6 +1154,31 @@ fn process_output_text(stdout: &[u8], stderr: &[u8]) -> String {
     combined.chars().take(8192).collect()
 }
 
+fn path_file_name_is(path: Option<&Path>, expected: &str) -> bool {
+    path.and_then(Path::file_name).and_then(|name| name.to_str()).map(|name| name.eq_ignore_ascii_case(expected)).unwrap_or(false)
+}
+
+fn find_native_codex_near_launcher(launcher: &Path) -> Option<PathBuf> {
+    let root = launcher.parent()?.join("node_modules").join("@openai").join("codex").join("node_modules");
+    let mut directories = vec![(root, 0_u8)];
+    while let Some((directory, depth)) = directories.pop() {
+        if depth > 6 { continue; }
+        let Ok(entries) = fs::read_dir(directory) else { continue; };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path_file_name_is(Some(path.as_path()), "codex.exe")
+                && path_file_name_is(path.parent(), "bin")
+                && path.components().any(|component| component.as_os_str().to_string_lossy().eq_ignore_ascii_case("vendor"))
+            {
+                return Some(path);
+            }
+            if path.is_dir() { directories.push((path, depth + 1)); }
+        }
+    }
+    None
+}
+
 fn app_data_dir() -> PathBuf {
     if let Some(local_app_data) = env::var_os("LOCALAPPDATA") { return PathBuf::from(local_app_data).join("AIUsageDock"); }
     if let Some(user_profile) = env::var_os("USERPROFILE") { return PathBuf::from(user_profile).join("AppData").join("Local").join("AIUsageDock"); }
@@ -965,7 +1188,8 @@ fn app_data_dir() -> PathBuf {
 fn resolve_codex_cli() -> Result<PathBuf, String> {
     #[cfg(windows)]
     {
-        let mut candidates = Vec::new();
+        let mut launchers = Vec::new();
+        let mut executables = Vec::new();
         let where_exe = env::var_os("WINDIR")
             .map(|windir| PathBuf::from(windir).join("System32").join("where.exe"))
             .filter(|path| path.is_file())
@@ -973,29 +1197,33 @@ fn resolve_codex_cli() -> Result<PathBuf, String> {
 
         for executable in ["codex.cmd", "codex.exe"] {
             if let Ok(output) = Command::new(&where_exe).arg(executable).output() {
-                candidates.extend(String::from_utf8_lossy(&output.stdout).lines().map(PathBuf::from));
+                let output_text = String::from_utf8_lossy(&output.stdout);
+                let paths = output_text.lines().map(PathBuf::from);
+                if executable.ends_with(".cmd") { launchers.extend(paths); } else { executables.extend(paths); }
             }
         }
         for variable in ["APPDATA", "LOCALAPPDATA"] {
             if let Some(root) = env::var_os(variable) {
                 let npm = PathBuf::from(root).join("npm");
-                candidates.push(npm.join("codex.cmd"));
-                candidates.push(npm.join("codex.exe"));
+                launchers.push(npm.join("codex.cmd"));
+                executables.push(npm.join("codex.exe"));
             }
         }
         if let Some(program_files) = env::var_os("ProgramFiles") {
             let node = PathBuf::from(program_files).join("nodejs");
-            candidates.push(node.join("codex.cmd"));
-            candidates.push(node.join("codex.exe"));
+            launchers.push(node.join("codex.cmd"));
+            executables.push(node.join("codex.exe"));
         }
 
-        for candidate in candidates {
-            if candidate.is_file() {
-                // Keep the normal Windows path form. `cmd.exe` cannot invoke a
-                // .cmd file through the `\\?\` path returned by canonicalize().
-                return Ok(candidate);
+        for launcher in &launchers {
+            if launcher.is_file() {
+                if let Some(native) = find_native_codex_near_launcher(launcher) {
+                    return Ok(native);
+                }
             }
         }
+        for executable in executables { if executable.is_file() { return Ok(executable); } }
+        for launcher in launchers { if launcher.is_file() { return Ok(launcher); } }
         Err("Codex CLI niet gevonden · controleer installatie en PATH".to_string())
     }
     #[cfg(not(windows))]
@@ -1117,6 +1345,13 @@ pub fn run() {
                 let _ = handle.emit("usage-updated", panel);
                 thread::sleep(Duration::from_secs(BACKGROUND_REFRESH_SECONDS));
             });
+            let announcement_coordinator = Arc::clone(&coordinator);
+            let announcement_handle = app.handle().clone();
+            thread::spawn(move || loop {
+                announcement_coordinator.refresh_announcements();
+                let _ = announcement_handle.emit("usage-updated", announcement_coordinator.panel_state());
+                thread::sleep(Duration::from_secs(ANNOUNCEMENTS_REFRESH_SECONDS));
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -1128,7 +1363,7 @@ pub fn run() {
                 _ => {}
             }
         })
-        .invoke_handler(tauri::generate_handler![get_initial_state, refresh_usage, connect_codex, reconnect_provider, update_settings, hide_window])
+        .invoke_handler(tauri::generate_handler![get_initial_state, refresh_usage, refresh_announcements, mark_announcements_read, connect_codex, reconnect_provider, update_settings, hide_window])
         .run(tauri::generate_context!())
         .expect("error while running AI Usage Dock");
 }
@@ -1201,5 +1436,19 @@ mod tests {
     fn diagnostic_excerpt_omits_sensitive_lines() {
         let output = safe_process_excerpt("connection reset\nhttps://example.test/login?token=secret\nAuthorization: Bearer secret\nretry later");
         assert_eq!(output, "connection reset | retry later");
+    }
+
+    #[test]
+    fn native_codex_is_preferred_next_to_npm_launcher() {
+        let root = env::temp_dir().join(format!("ai-usage-dock-resolver-{}-{}", std::process::id(), unix_now()));
+        let launcher = root.join("npm").join("codex.cmd");
+        let native = root.join("npm").join("node_modules").join("@openai").join("codex").join("node_modules").join("@openai").join("codex-win32-x64").join("vendor").join("x86_64-pc-windows-msvc").join("bin").join("codex.exe");
+        fs::create_dir_all(launcher.parent().expect("launcher parent")).expect("launcher directory");
+        fs::create_dir_all(native.parent().expect("native parent")).expect("native directory");
+        fs::write(&launcher, "@echo off").expect("launcher");
+        fs::write(&native, "binary").expect("native");
+
+        assert_eq!(find_native_codex_near_launcher(&launcher), Some(native));
+        let _ = fs::remove_dir_all(root);
     }
 }

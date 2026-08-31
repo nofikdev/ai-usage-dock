@@ -3,7 +3,7 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import { createFixtureState, emptySnapshot } from "./lib/fixtures";
 import { compactStatusLabel, formatAge, formatReset, statusLabel, usageTone, windowLabel } from "./lib/formatters";
 import { invokeNative, isNativeRuntime, listenNative, startNativeDragging } from "./lib/tauri";
-import type { DockSettings, PanelState, ProviderId, UsageSnapshot, UsageWindow } from "./types";
+import type { AnnouncementFeed, AnnouncementItem, DockSettings, PanelState, ProviderId, UsageSnapshot, UsageWindow } from "./types";
 
 const providerOrder: ProviderId[] = ["codex-account-1", "codex-account-2", "claude"];
 
@@ -21,6 +21,7 @@ function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [actionAccount, setActionAccount] = useState<ProviderId | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [showAnnouncements, setShowAnnouncements] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -73,6 +74,8 @@ function App() {
   );
   const hasConnectedProvider = snapshots.some((snapshot) => snapshot.windows.length > 0 || snapshot.status === "loading");
   const showOnboarding = !onboardingDismissed && !isLoading && !hasConnectedProvider && snapshots.every((snapshot) => snapshot.status === "auth_required");
+  const latestAnnouncement = panel.announcements.items[0] ?? null;
+  const hasUnreadAnnouncement = latestAnnouncement !== null && latestAnnouncement.id !== panel.announcements.lastSeenId;
 
   async function refresh() {
     setIsRefreshing(true);
@@ -130,6 +133,20 @@ function App() {
     if (isNativeRuntime) await invokeNative("hide_window");
   }
 
+  async function toggleAnnouncements() {
+    const willOpen = !showAnnouncements;
+    setShowAnnouncements(willOpen);
+    if (!willOpen || !isNativeRuntime) return;
+    try {
+      const refreshed = await invokeNative<PanelState>("refresh_announcements");
+      setPanel(refreshed);
+      const newest = refreshed.announcements.items[0];
+      if (newest) setPanel(await invokeNative<PanelState>("mark_announcements_read", { id: newest.id }));
+    } catch {
+      // Announcements are optional and must never surface as a usage error.
+    }
+  }
+
   if (view === "settings") {
     return (
       <SettingsView
@@ -162,6 +179,12 @@ function App() {
           <h1>AI usage</h1>
         </div>
         <div className="top-actions">
+          {panel.announcements.items.length > 0 ? (
+            <button className="icon-button announcement-button" type="button" aria-label="Aankondigingen" title="Aankondigingen" onClick={() => void toggleAnnouncements()}>
+              <AnnouncementIcon />
+              {hasUnreadAnnouncement ? <span className="unread-dot" aria-hidden="true" /> : null}
+            </button>
+          ) : null}
           <button className="icon-button" type="button" aria-label="Vernieuwen" title="Vernieuwen" onClick={() => void refresh()} disabled={isRefreshing}>
             <RefreshIcon spinning={isRefreshing} />
           </button>
@@ -173,6 +196,8 @@ function App() {
           </button>
         </div>
       </header>
+
+      {showAnnouncements && panel.announcements.items.length > 0 ? <AnnouncementPopover feed={panel.announcements} /> : null}
 
       {loadError ? <div className="notice notice-error" role="status">{loadError}</div> : null}
 
@@ -189,6 +214,39 @@ function App() {
 
     </main>
   );
+}
+
+function AnnouncementPopover({ feed }: { feed: AnnouncementFeed }) {
+  return (
+    <aside className="announcement-popover" aria-label="Aankondigingen">
+      <div className="announcement-heading">
+        <span>Aankondigingen</span>
+        <span className={`announcement-state announcement-state-${feed.status}`}>{feed.status === "stale" ? "cache" : "nieuw"}</span>
+      </div>
+      <div className="announcement-list">
+        {feed.items.slice(0, 3).map((item) => <AnnouncementRow key={item.id} item={item} />)}
+      </div>
+    </aside>
+  );
+}
+
+function AnnouncementRow({ item }: { item: AnnouncementItem }) {
+  return (
+    <article className="announcement-row">
+      <div className="announcement-meta">
+        <span>{announcementCategory(item.category)}</span>
+        {item.publishedAt ? <time dateTime={new Date(item.publishedAt * 1000).toISOString()}>{formatAge(item.publishedAt)}</time> : null}
+      </div>
+      <p>{item.text}</p>
+      <a href={item.url} target="_blank" rel="noreferrer">Open op X</a>
+    </article>
+  );
+}
+
+function announcementCategory(category: string): string {
+  if (category === "usage_limits") return "Usage-update";
+  if (category === "codex") return "Codex-update";
+  return "OpenAI-update";
 }
 
 function ProviderSection({
@@ -375,6 +433,10 @@ function nativeErrorMessage(error: unknown, fallback: string): string {
 
 function RefreshIcon({ spinning = false }: { spinning?: boolean }) {
   return <svg className={spinning ? "icon spinning" : "icon"} viewBox="0 0 20 20" aria-hidden="true"><path d="M16.5 7.5A6.5 6.5 0 1 0 17 12" /><path d="M16.5 3.5v4h-4" /></svg>;
+}
+
+function AnnouncementIcon() {
+  return <svg className="icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 7.5 15 4v9L4 9.5z" /><path d="M4 9.5v4M7 10.5l1.5 4" /><path d="M17 7v3" /></svg>;
 }
 
 function SettingsIcon() {

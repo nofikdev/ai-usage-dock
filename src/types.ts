@@ -1,6 +1,7 @@
 export type ProviderId = "codex-account-1" | "codex-account-2" | "claude";
 export type ProviderStatus = "loading" | "healthy" | "stale" | "auth_required" | "unavailable";
 export type UsageWindowType = "five_hour" | "weekly";
+export type AnnouncementFeedStatus = "loading" | "healthy" | "stale" | "unavailable";
 
 export interface UsageWindow {
   type: UsageWindowType;
@@ -29,9 +30,26 @@ export interface DockSettings {
   labels: Record<ProviderId, string>;
 }
 
+export interface AnnouncementItem {
+  id: string;
+  publishedAt: number | null;
+  text: string;
+  url: string;
+  category: string;
+}
+
+export interface AnnouncementFeed {
+  status: AnnouncementFeedStatus;
+  fetchedAt: number | null;
+  error: string | null;
+  items: AnnouncementItem[];
+  lastSeenId: string | null;
+}
+
 export interface PanelState {
   snapshots: UsageSnapshot[];
   settings: DockSettings;
   hasFetched: boolean;
   lastUpdatedAt: number | null;
+  announcements: AnnouncementFeed;
 }

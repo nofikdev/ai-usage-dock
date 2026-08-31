@@ -13,6 +13,7 @@ De huidige release bevat:
 - opgeslagen vensterpositie en -afmetingen;
 - Codex-usage per account en Claude Code-usage;
 - automatische refresh met een rustige interval en handmatige refresh.
+- optionele, gecachte aankondigingen van het publieke X-account `@thsottiaux`.
 
 ## Gebouwd met
 
@@ -51,7 +52,17 @@ The browser development fallback renders safe fixture data so the layout can be 
 
 ## Native provider notes
 
-Codex is queried through two long-lived `codex app-server --stdio` processes. Claude uses the existing Claude Code OAuth credentials and its compatibility usage endpoint behind `ClaudeUsageProvider`. Provider failures preserve the last valid snapshot and never put provider credentials into React state or the state file.
+Codex is queried through short-lived `codex app-server --stdio` sessions. The Windows build prefers the native `codex.exe` next to the npm installation, so normal refreshes do not open `cmd.exe`; the `.cmd` launcher is only a last fallback. Claude uses the existing Claude Code OAuth credentials and its compatibility usage endpoint behind `ClaudeUsageProvider`. Provider failures preserve the last valid snapshot and never put provider credentials into React state or the state file.
+
+## Announcement feed
+
+The optional feed is published as `feed/announcements.json`. A scheduled GitHub
+Action reads public posts from `@thsottiaux` through the official X API and
+commits only changed, relevant items. To enable it, the repository maintainer
+adds an `X_BEARER_TOKEN` repository secret and runs **Update announcement feed**
+once from the Actions tab. End users do not need an X account or token: the
+dock reads the public feed and keeps the last valid copy locally. If the feed is
+empty or offline, usage continues unchanged.
 
 If Codex cannot connect, check the local CLI once in PowerShell:
 

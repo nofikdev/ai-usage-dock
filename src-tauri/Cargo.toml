@@ -1,6 +1,6 @@
 [package]
 name = "ai-usage-dock"
-version = "0.1.5"
+version = "0.2.0"
 description = "A local Windows usage dock for Codex and Claude Code"
 authors = ["AI Usage Dock"]
 edition = "2021"

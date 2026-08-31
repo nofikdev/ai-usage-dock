@@ -1,4 +1,4 @@
-import type { DockSettings, PanelState, ProviderId, UsageSnapshot, UsageWindow } from "../types";
+import type { AnnouncementFeed, DockSettings, PanelState, ProviderId, UsageSnapshot, UsageWindow } from "../types";
 
 const now = Math.floor(Date.now() / 1000);
 
@@ -64,12 +64,21 @@ const fixtureSnapshots: UsageSnapshot[] = [
   },
 ];
 
+const fixtureAnnouncements: AnnouncementFeed = {
+  status: "unavailable",
+  fetchedAt: null,
+  error: null,
+  items: [],
+  lastSeenId: null,
+};
+
 export function createFixtureState(): PanelState {
   return {
     snapshots: fixtureSnapshots,
     settings,
     hasFetched: true,
     lastUpdatedAt: now,
+    announcements: fixtureAnnouncements,
   };
 }
 

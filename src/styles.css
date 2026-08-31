@@ -34,6 +34,7 @@ button { cursor: pointer; }
 button:disabled { cursor: default; opacity: .55; }
 
 .app-shell {
+  position: relative;
   width: 100%;
   min-height: 100vh;
   margin: 0;
@@ -95,6 +96,8 @@ h1 { font-size: 15px; font-weight: 650; letter-spacing: -.01em; line-height: 1.2
 .icon-button { width: 25px; height: 25px; border-radius: 5px; }
 .icon-button:hover, .icon-button:focus-visible { color: var(--ink); background: #f0f2f4; outline: none; }
 .close-button:hover, .close-button:focus-visible { color: var(--danger); background: var(--danger-soft); }
+.announcement-button { position: relative; }
+.unread-dot { position: absolute; top: 4px; right: 4px; width: 5px; height: 5px; border: 1px solid var(--surface); border-radius: 50%; background: var(--accent); }
 .icon { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.45; }
 .spinning { animation: spin .8s linear infinite; }
 .arrow-icon { width: 14px; height: 14px; }
@@ -107,6 +110,18 @@ h1 { font-size: 15px; font-weight: 650; letter-spacing: -.01em; line-height: 1.2
 
 .notice { margin: 10px 14px 0; padding: 8px 9px; border: 1px solid; border-radius: 5px; font-size: 11px; line-height: 1.35; }
 .notice-error { color: var(--danger); background: var(--danger-soft); border-color: #f1d4d2; }
+
+.announcement-popover { position: absolute; top: 39px; right: 7px; z-index: 20; width: min(276px, calc(100% - 14px)); max-height: calc(100% - 46px); overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); box-shadow: 0 8px 24px #1d252b1c; }
+.announcement-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 1px 2px 6px; color: var(--ink); font-size: 10px; font-weight: 700; }
+.announcement-state { color: var(--accent); font-size: 8px; font-weight: 600; text-transform: uppercase; }
+.announcement-state-stale { color: var(--warning); }
+.announcement-row { padding: 7px 2px; border-top: 1px solid #f0f1f2; }
+.announcement-row:first-child { border-top: 0; }
+.announcement-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 8px; font-weight: 650; text-transform: uppercase; }
+.announcement-meta time { color: var(--soft); font-weight: 500; text-transform: none; }
+.announcement-row p { display: -webkit-box; overflow: hidden; margin-top: 4px; color: var(--ink); font-size: 10px; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.announcement-row a { display: inline-block; margin-top: 4px; color: var(--accent); font-size: 9px; font-weight: 650; text-decoration: none; }
+.announcement-row a:hover, .announcement-row a:focus-visible { color: #2b5d53; text-decoration: underline; outline: none; }
 
 .provider-list { padding: 0 10px; }
 .provider-section { padding: 9px 0 8px; border-bottom: 1px solid var(--line); }
@@ -206,6 +221,9 @@ h1 { font-size: 15px; font-weight: 650; letter-spacing: -.01em; line-height: 1.2
   .top-actions { gap: 0; }
   .icon-button { width: 22px; height: 22px; }
   .icon { width: 14px; height: 14px; }
+  .announcement-popover { top: 31px; right: 5px; width: min(250px, calc(100% - 10px)); max-height: calc(100% - 36px); padding: 6px; }
+  .announcement-row { padding-top: 5px; padding-bottom: 5px; }
+  .announcement-row p { -webkit-line-clamp: 2; }
   .provider-list { padding-right: 6px; padding-left: 6px; }
   .provider-section { padding-top: 3px; padding-bottom: 3px; }
   .provider-heading { gap: 4px; margin-bottom: 2px; }
