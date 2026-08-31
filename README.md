@@ -4,7 +4,7 @@ Small local Windows utility for seeing the remaining Codex and Claude Code subsc
 
 ## Installeren
 
-Download bij [Releases](../../releases/latest) de nieuwste `AI Usage Dock_*_x64-setup.exe` en start de installer. Sluit een oudere dock-versie eerst via het systeemvak. De dock draait lokaal op Windows; er is geen PHP-, Apache-, localhost- of cloudserver nodig.
+Download bij [Releases](../../releases/latest) `AI-Usage-Dock-Setup.exe` en start de installer. Dit bestand is altijd de nieuwste Windows-release. Sluit een oudere dock-versie eerst via het systeemvak. De dock draait lokaal op Windows; er is geen PHP-, Apache-, localhost- of cloudserver nodig.
 
 De huidige release bevat:
 
