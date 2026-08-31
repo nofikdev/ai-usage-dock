@@ -35,7 +35,7 @@ export function formatAge(timestamp: number | null): string {
 }
 
 export function windowLabel(type: UsageWindowType): string {
-  return type === "five_hour" ? "5h" : "week";
+  return type === "five_hour" ? "5h" : "7d";
 }
 
 export function usageTone(remainingPercent: number): "normal" | "warning" | "danger" | "limit" {
@@ -57,5 +57,20 @@ export function statusLabel(status: ProviderStatus): string {
       return "niet beschikbaar";
     case "loading":
       return "laden";
+  }
+}
+
+export function compactStatusLabel(status: ProviderStatus): string {
+  switch (status) {
+    case "healthy":
+      return "";
+    case "stale":
+      return "stale";
+    case "auth_required":
+      return "login";
+    case "unavailable":
+      return "offline";
+    case "loading":
+      return "…";
   }
 }

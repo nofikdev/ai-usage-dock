@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 declare global {
   interface Window {
@@ -15,6 +16,11 @@ export function invokeNative<T>(command: string, args?: Record<string, unknown>)
   }
 
   return invoke<T>(command, args);
+}
+
+export function startNativeDragging(): Promise<void> {
+  if (!isNativeRuntime) return Promise.resolve();
+  return getCurrentWindow().startDragging();
 }
 
 export function listenNative<T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> {

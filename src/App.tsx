@@ -1,11 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type PointerEvent } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { createFixtureState, emptySnapshot } from "./lib/fixtures";
-import { formatAge, formatFetchedAt, formatReset, statusLabel, usageTone, windowLabel } from "./lib/formatters";
-import { invokeNative, isNativeRuntime, listenNative } from "./lib/tauri";
+import { compactStatusLabel, formatAge, formatReset, statusLabel, usageTone, windowLabel } from "./lib/formatters";
+import { invokeNative, isNativeRuntime, listenNative, startNativeDragging } from "./lib/tauri";
 import type { DockSettings, PanelState, ProviderId, ProviderStatus, UsageSnapshot, UsageWindow } from "./types";
 
 const providerOrder: ProviderId[] = ["codex-account-1", "codex-account-2", "claude"];
+
+function handleDragStart(event: PointerEvent<HTMLDivElement>) {
+  if (event.button !== 0 || !isNativeRuntime) return;
+  event.preventDefault();
+  void startNativeDragging();
+}
 
 function App() {
   const [panel, setPanel] = useState<PanelState>(() => createFixtureState());
@@ -145,27 +151,12 @@ function App() {
     );
   }
 
-  const healthyCount = snapshots.filter((snapshot) => snapshot.status === "healthy").length;
-  const staleCount = snapshots.filter((snapshot) => snapshot.status === "stale").length;
-  const summary = isLoading
-    ? "Providers verbinden…"
-    : staleCount > 0
-      ? `${staleCount} provider${staleCount === 1 ? "" : "s"} stale`
-      : healthyCount === snapshots.length
-        ? "Alle providers live"
-        : "Wacht op login";
-
   return (
     <main className="app-shell">
-      <header className="topbar drag-region" data-tauri-drag-region>
-        <div className="brand-mark" aria-hidden="true">
-          <span />
-          <span />
-          <span />
-        </div>
-        <div className="title-block">
-          <span className="eyebrow">AI USAGE</span>
-          <h1>Usage dock</h1>
+      <header className="topbar">
+        <div className="drag-handle" data-tauri-drag-region onPointerDown={handleDragStart}>
+          <div className="brand-mark" aria-hidden="true"><span /><span /><span /></div>
+          <h1>AI usage</h1>
         </div>
         <div className="top-actions">
           <button className="icon-button" type="button" aria-label="Vernieuwen" title="Vernieuwen" onClick={() => void refresh()} disabled={isRefreshing}>
@@ -180,12 +171,6 @@ function App() {
         </div>
       </header>
 
-      <section className="sync-line" aria-live="polite">
-        <span className={`status-dot ${staleCount > 0 ? "status-dot-warning" : ""}`} aria-hidden="true" />
-        <span>{summary}</span>
-        <span className="sync-time">{formatFetchedAt(panel.lastUpdatedAt)}</span>
-      </section>
-
       {loadError ? <div className="notice notice-error" role="status">{loadError}</div> : null}
 
       <section className="provider-list" aria-label="AI usage per provider">
@@ -199,12 +184,6 @@ function App() {
         ))}
       </section>
 
-      <footer className="dock-footer">
-        <span className="footer-note">Automatisch elke 60 sec</span>
-        <button className="text-button" type="button" onClick={() => void refresh()} disabled={isRefreshing}>
-          {isRefreshing ? "Bijwerken…" : "Nu bijwerken"}
-        </button>
-      </footer>
     </main>
   );
 }
@@ -222,17 +201,17 @@ function ProviderSection({
   const actionLabel = snapshot.accountId === "claude" ? "Reconnect" : "Connect";
   const isConnecting = actionAccount === snapshot.accountId;
   const isActionable = snapshot.status === "auth_required" || snapshot.status === "unavailable";
+  const statusText = compactStatusLabel(snapshot.status);
+  const details = [snapshot.plan, snapshot.accountIdentity, snapshot.rateLimitReachedType ? `limit: ${snapshot.rateLimitReachedType}` : null].filter(Boolean).join(" · ");
+  const statusDescription = snapshot.status === "healthy" ? "live" : statusLabel(snapshot.status);
 
   return (
     <article className="provider-section">
       <div className="provider-heading">
-        <div className="provider-heading-copy">
-          <span className="provider-name">{identity}</span>
-          <span className="provider-plan">{snapshot.plan}</span>
-        </div>
-        <span className={`provider-status provider-status-${snapshot.status}`}>
+        <span className="provider-name">{identity}</span>
+        <span className={`provider-status provider-status-${snapshot.status}`} title={details || statusDescription} aria-label={`${identity}: ${statusDescription}`}>
           <span className="status-dot" aria-hidden="true" />
-          {statusLabel(snapshot.status)}
+          {statusText}
         </span>
       </div>
 
@@ -291,9 +270,11 @@ function OnboardingView({
 }) {
   return (
     <main className="app-shell onboarding-view">
-      <header className="topbar drag-region" data-tauri-drag-region>
-        <div className="brand-mark" aria-hidden="true"><span /><span /><span /></div>
-        <div className="title-block"><span className="eyebrow">AI USAGE</span><h1>Welkom</h1></div>
+      <header className="topbar">
+        <div className="drag-handle" data-tauri-drag-region onPointerDown={handleDragStart}>
+          <div className="brand-mark" aria-hidden="true"><span /><span /><span /></div>
+          <h1>AI usage</h1>
+        </div>
       </header>
       <div className="onboarding-copy">
         <h2>Je usage, altijd in beeld.</h2>

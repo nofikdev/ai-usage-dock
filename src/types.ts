@@ -15,6 +15,8 @@ export interface UsageSnapshot {
   accountId: ProviderId;
   displayName: string;
   plan: string;
+  accountIdentity?: string | null;
+  rateLimitReachedType?: string | null;
   fetchedAt: number | null;
   status: ProviderStatus;
   error: string | null;

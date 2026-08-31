@@ -1,3 +1,4 @@
+use chrono::DateTime;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -12,7 +13,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::menu::{Menu, MenuItem};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Position, State, TrayIconBuilder, WindowEvent};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
 
 const ACCOUNT_IDS: [&str; 3] = ["codex-account-1", "codex-account-2", "claude"];
@@ -36,6 +38,10 @@ pub struct UsageSnapshot {
     pub account_id: String,
     pub display_name: String,
     pub plan: String,
+    #[serde(default)]
+    pub account_identity: Option<String>,
+    #[serde(default)]
+    pub rate_limit_reached_type: Option<String>,
     pub fetched_at: Option<i64>,
     pub status: String,
     pub error: Option<String>,
@@ -66,11 +72,21 @@ struct WindowPosition {
     y: i32,
 }
 
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WindowSize {
+    width: u32,
+    height: u32,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedState {
     snapshots: Vec<UsageSnapshot>,
+    #[serde(default)]
     window_position: Option<WindowPosition>,
+    #[serde(default)]
+    window_size: Option<WindowSize>,
     settings: DockSettings,
     last_updated_at: Option<i64>,
 }
@@ -80,6 +96,7 @@ impl Default for PersistedState {
         Self {
             snapshots: Vec::new(),
             window_position: None,
+            window_size: None,
             settings: DockSettings::default(),
             last_updated_at: None,
         }
@@ -223,8 +240,8 @@ impl UsageCoordinator {
         }
 
         match result {
-            Ok((identity, windows)) => {
-                self.set_success(account_id, identity, windows);
+            Ok((identity, plan, rate_limit_reached_type, windows)) => {
+                self.set_success(account_id, identity, plan, rate_limit_reached_type, windows);
                 self.log_event(&format!("{} fetch success", account_id));
                 true
             }
@@ -329,22 +346,24 @@ impl UsageCoordinator {
             }
         };
         self.reset_claude_backoff();
-        self.set_success("claude", None, windows);
+        self.set_success("claude", None, None, None, windows);
         self.log_event("claude fetch success");
         true
     }
 
-    fn set_success(&self, account_id: &str, identity: Option<String>, windows: Vec<UsageWindow>) {
+    fn set_success(&self, account_id: &str, identity: Option<String>, plan: Option<String>, rate_limit_reached_type: Option<String>, windows: Vec<UsageWindow>) {
         let settings = self.persisted.lock().expect("state lock poisoned").settings.clone();
         let mut snapshots = self.snapshots.lock().expect("snapshot lock poisoned");
         let previous = snapshots.get(account_id).cloned();
         let label = settings.labels.get(account_id).cloned().unwrap_or_default();
-        let display_name = if !label.trim().is_empty() { label } else if let Some(identity) = identity { identity } else { account_id.to_string() };
+        let display_name = if !label.trim().is_empty() { label } else if let Some(identity) = identity.clone() { identity } else { account_id.to_string() };
         snapshots.insert(account_id.to_string(), UsageSnapshot {
             provider: if account_id == "claude" { "claude" } else { "codex" }.to_string(),
             account_id: account_id.to_string(),
             display_name,
-            plan: if account_id == "claude" { "Claude Pro" } else { "ChatGPT Plus" }.to_string(),
+            plan: plan.unwrap_or_else(|| if account_id == "claude" { "Claude Pro" } else { "ChatGPT Plus" }.to_string()),
+            account_identity: identity.clone(),
+            rate_limit_reached_type,
             fetched_at: Some(unix_now()),
             status: "healthy".to_string(),
             error: None,
@@ -405,9 +424,23 @@ impl UsageCoordinator {
         }
     }
 
+    fn restore_window_size(&self, app: &AppHandle) {
+        let Some(window) = app.get_webview_window("main") else { return; };
+        let saved = self.persisted.lock().ok().and_then(|state| state.window_size.clone());
+        let Some(size) = saved else { return; };
+        let _ = window.set_size(Size::Physical(PhysicalSize::new(size.width, size.height)));
+    }
+
     fn save_window_position(&self, position: PhysicalPosition<i32>) {
         if let Ok(mut persisted) = self.persisted.lock() {
             persisted.window_position = Some(WindowPosition { x: position.x, y: position.y });
+            self.persist_snapshots_locked(&mut persisted);
+        }
+    }
+
+    fn save_window_size(&self, size: PhysicalSize<u32>) {
+        if let Ok(mut persisted) = self.persisted.lock() {
+            persisted.window_size = Some(WindowSize { width: size.width, height: size.height });
             self.persist_snapshots_locked(&mut persisted);
         }
     }
@@ -474,7 +507,7 @@ impl CodexSession {
 
         let mut session = Self { child, stdin, responses, next_id: 1 };
         session.request("initialize", json!({
-            "clientInfo": { "name": "ai-usage-dock", "version": "0.1.0" },
+            "clientInfo": { "name": "ai-usage-dock", "version": "0.1.1" },
             "capabilities": {}
         }))?;
         session.notify("initialized", json!({}))?;
@@ -485,13 +518,15 @@ impl CodexSession {
         self.child.try_wait().map(|status| status.is_none()).unwrap_or(false)
     }
 
-    fn fetch_usage(&mut self) -> Result<(Option<String>, Vec<UsageWindow>), String> {
+    fn fetch_usage(&mut self) -> Result<(Option<String>, Option<String>, Option<String>, Vec<UsageWindow>), String> {
         let account = self.request("account/read", json!({}))?;
         let limits = self.request("account/rateLimits/read", json!({}))?;
         let identity = find_string(&account, &["email", "emailAddress", "email_address"]);
+        let plan = find_string(&account, &["planType", "plan_type", "subscription"]);
+        let rate_limit_reached_type = find_string(&limits, &["rateLimitReachedType", "rate_limit_reached_type"]);
         let windows = parse_codex_windows(&limits);
         if windows.is_empty() { return Err("Onbekend rate-limit formaat".to_string()); }
-        Ok((identity, windows))
+        Ok((identity, plan, rate_limit_reached_type, windows))
     }
 
     fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
@@ -579,6 +614,8 @@ fn initial_snapshot(account_id: &str, settings: &DockSettings) -> UsageSnapshot 
         account_id: account_id.to_string(),
         display_name: settings.labels.get(account_id).cloned().unwrap_or_else(|| account_id.to_string()),
         plan: if account_id == "claude" { "Claude Pro" } else { "ChatGPT Plus" }.to_string(),
+        account_identity: None,
+        rate_limit_reached_type: None,
         fetched_at: None,
         status: if account_id == "claude" && claude_credentials_path().is_some() { "loading" } else { "auth_required" }.to_string(),
         error: None,
@@ -645,8 +682,10 @@ fn as_f64(value: &Value) -> Option<f64> {
 }
 
 fn parse_timestamp(value: &Value) -> Option<i64> {
-    let number = value.as_i64().or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok())).or_else(|| value.as_str().and_then(|value| value.parse().ok()))?;
-    Some(if number > 20_000_000_000 { number / 1000 } else { number })
+    if let Some(number) = value.as_i64().or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok())).or_else(|| value.as_str().and_then(|value| value.parse().ok())) {
+        return Some(if number > 20_000_000_000 { number / 1000 } else { number });
+    }
+    value.as_str().and_then(|value| DateTime::parse_from_rfc3339(value).ok()).map(|value| value.timestamp())
 }
 
 fn find_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -718,7 +757,7 @@ fn unix_now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs() as i64).unwrap_or_default()
 }
 
-fn setup_tray<R: tauri::Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show / Hide", true, None::<&str>)?;
     let refresh = MenuItem::with_id(app, "refresh", "Refresh", true, None::<&str>)?;
     let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
@@ -770,6 +809,7 @@ pub fn run() {
         .manage(AppState { coordinator: Arc::clone(&coordinator) })
         .setup(move |app| {
             setup_tray(&app.handle())?;
+            coordinator.restore_window_size(app.handle());
             coordinator.restore_window_position(app.handle());
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_always_on_top(coordinator.persisted.lock().map(|state| state.settings.always_on_top).unwrap_or(true));
@@ -790,6 +830,7 @@ pub fn run() {
             match event {
                 WindowEvent::CloseRequested { api, .. } => { api.prevent_close(); let _ = window.hide(); }
                 WindowEvent::Moved(position) => state.coordinator.save_window_position(*position),
+                WindowEvent::Resized(size) => state.coordinator.save_window_size(*size),
                 _ => {}
             }
         })
@@ -838,5 +879,10 @@ mod tests {
     fn millisecond_reset_timestamps_are_normalized() {
         assert_eq!(parse_timestamp(&json!(1_800_000_000_000_i64)), Some(1_800_000_000));
         assert_eq!(parse_timestamp(&json!(1_800_000_000_i64)), Some(1_800_000_000));
+    }
+
+    #[test]
+    fn iso_reset_timestamps_are_normalized_for_claude() {
+        assert_eq!(parse_timestamp(&json!("2026-08-31T16:42:00Z")), Some(1_788_194_520));
     }
 }
