@@ -22,6 +22,7 @@ use tauri_plugin_autostart::ManagerExt;
 const ACCOUNT_IDS: [&str; 3] = ["codex-account-1", "codex-account-2", "claude"];
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const BACKGROUND_REFRESH_SECONDS: u64 = 300;
+const CODEX_REQUEST_TIMEOUT_SECONDS: u64 = 30;
 const CODEX_BACKOFF_SECONDS: [u64; 5] = [60, 120, 240, 480, 900];
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -242,6 +243,9 @@ impl UsageCoordinator {
         };
         let home = self.codex_home(account_id);
         let mut slot = slot.lock().expect("session lock poisoned");
+        // app-server keeps a network connection alive. Start each poll cleanly so a
+        // connection that went stale cannot poison every later usage check.
+        slot.session = None;
         let mut result = Err("Codex CLI niet gevonden".to_string());
 
         for attempt in 0..2 {
@@ -265,7 +269,7 @@ impl UsageCoordinator {
             }
         }
 
-        match result {
+        let success = match result {
             Ok((identity, plan, rate_limit_reached_type, windows)) => {
                 self.reset_codex_backoff(account_id);
                 self.set_success(account_id, identity, plan, rate_limit_reached_type, windows);
@@ -276,7 +280,12 @@ impl UsageCoordinator {
                 self.record_codex_failure(account_id, &error);
                 false
             }
-        }
+        };
+
+        // Do not retain an app-server process between polls. This also makes the
+        // retry path deterministic after a provider-side disconnect.
+        slot.session = None;
+        success
     }
 
     fn refresh_claude(&self) -> bool {
@@ -608,7 +617,7 @@ impl CodexSession {
 
         let mut session = Self { child, stdin, responses, stderr: stderr_buffer, next_id: 1 };
         session.request("initialize", json!({
-            "clientInfo": { "name": "ai-usage-dock", "version": "0.1.4" },
+            "clientInfo": { "name": "ai-usage-dock", "version": "0.1.5" },
             "capabilities": {}
         }))?;
         session.notify("initialized", json!({}))?;
@@ -641,7 +650,7 @@ impl CodexSession {
         let message = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         writeln!(self.stdin, "{}", message).map_err(|_| "Codex app-server is gestopt".to_string())?;
 
-        let deadline = Instant::now() + Duration::from_secs(12);
+        let deadline = Instant::now() + Duration::from_secs(CODEX_REQUEST_TIMEOUT_SECONDS);
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() { return Err(self.with_stderr("Codex app-server reageert niet")); }
@@ -670,6 +679,7 @@ impl CodexSession {
 impl Drop for CodexSession {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -981,7 +991,9 @@ fn resolve_codex_cli() -> Result<PathBuf, String> {
 
         for candidate in candidates {
             if candidate.is_file() {
-                return candidate.canonicalize().or(Ok(candidate));
+                // Keep the normal Windows path form. `cmd.exe` cannot invoke a
+                // .cmd file through the `\\?\` path returned by canonicalize().
+                return Ok(candidate);
             }
         }
         Err("Codex CLI niet gevonden · controleer installatie en PATH".to_string())
@@ -998,10 +1010,9 @@ fn codex_command(args: &[&str], home: &Path) -> Result<Command, String> {
     {
         let is_script = executable.extension().and_then(|extension| extension.to_str()).map(|extension| extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")).unwrap_or(false);
         let mut command = if is_script {
-            let command_line = format!("\"{}\" {}", executable.display(), args.join(" "));
             let shell = env::var_os("COMSPEC").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("cmd.exe"));
             let mut command = Command::new(shell);
-            command.args(["/D", "/S", "/C"]).arg(command_line);
+            command.args(["/D", "/S", "/C", "call"]).arg(executable).args(args);
             command
         } else {
             let mut command = Command::new(executable);
