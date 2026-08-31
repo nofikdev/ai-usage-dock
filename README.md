@@ -2,6 +2,27 @@
 
 Small local Windows utility for seeing the remaining Codex and Claude Code subscription windows at a glance.
 
+## Installeren
+
+Download bij [Releases](../../releases/latest) de nieuwste `AI Usage Dock_*_x64-setup.exe` en start de installer. Sluit een oudere dock-versie eerst via het systeemvak. De dock draait lokaal op Windows; er is geen PHP-, Apache-, localhost- of cloudserver nodig.
+
+De huidige release bevat:
+
+- één dock-instantie tegelijk;
+- compacte, versleepbare en resizable UI;
+- opgeslagen vensterpositie en -afmetingen;
+- Codex-usage per account en Claude Code-usage;
+- automatische refresh met een rustige interval en handmatige refresh.
+
+## Gebouwd met
+
+- **Rust** — de native Windows-laag via Tauri: venster, systeemvak, lokale opslag, processen en provider-requests;
+- **TypeScript + React** — de zichtbare dock en instellingen;
+- **CSS** — compacte en responsive layout;
+- **Node.js/npm** — development- en build tooling.
+
+Er wordt geen PHP gebruikt in dit project. De Codex- en Claude-login blijven lokaal op de computer; tokens worden niet naar de React-state of het opgeslagen dock-statebestand gekopieerd.
+
 ## Current shape
 
 - Tauri 2 + React + TypeScript + Rust
