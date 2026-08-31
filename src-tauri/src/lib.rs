@@ -457,9 +457,7 @@ impl UsageCoordinator {
 impl CodexSession {
     fn start(home: &Path) -> Result<Self, String> {
         let _ = fs::create_dir_all(home);
-        let mut child = Command::new("codex")
-            .args(["app-server", "--stdio"])
-            .env("CODEX_HOME", home)
+        let mut child = codex_command(&["app-server", "--stdio"], home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -550,9 +548,7 @@ fn connect_codex(account_id: String, state: State<'_, AppState>) -> Result<(), S
         return Err("Onbekend Codex-account".to_string());
     }
     let home = state.coordinator.codex_home(&account_id);
-    let status = Command::new("codex")
-        .arg("login")
-        .env("CODEX_HOME", home)
+    let status = codex_command(&["login"], &home)
         .status()
         .map_err(|_| "Codex CLI niet gevonden".to_string())?;
     if status.success() { Ok(()) } else { Err("Codex-login is niet afgerond".to_string()) }
@@ -689,6 +685,24 @@ fn app_data_dir() -> PathBuf {
     if let Some(local_app_data) = env::var_os("LOCALAPPDATA") { return PathBuf::from(local_app_data).join("AIUsageDock"); }
     if let Some(user_profile) = env::var_os("USERPROFILE") { return PathBuf::from(user_profile).join("AppData").join("Local").join("AIUsageDock"); }
     PathBuf::from("AIUsageDock")
+}
+
+fn codex_command(args: &[&str], home: &Path) -> Command {
+    #[cfg(windows)]
+    {
+        let mut command = Command::new("cmd");
+        command.args(["/D", "/S", "/C", "codex.cmd"]);
+        command.args(args);
+        command.env("CODEX_HOME", home);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("codex");
+        command.args(args);
+        command.env("CODEX_HOME", home);
+        command
+    }
 }
 
 fn claude_credentials_path() -> Option<PathBuf> {
