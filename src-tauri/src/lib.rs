@@ -21,6 +21,7 @@ use tauri_plugin_autostart::ManagerExt;
 
 const ACCOUNT_IDS: [&str; 3] = ["codex-account-1", "codex-account-2", "claude"];
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const BACKGROUND_REFRESH_SECONDS: u64 = 300;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -509,7 +510,7 @@ impl CodexSession {
 
         let mut session = Self { child, stdin, responses, next_id: 1 };
         session.request("initialize", json!({
-            "clientInfo": { "name": "ai-usage-dock", "version": "0.1.2" },
+            "clientInfo": { "name": "ai-usage-dock", "version": "0.1.3" },
             "capabilities": {}
         }))?;
         session.notify("initialized", json!({}))?;
@@ -811,6 +812,12 @@ pub fn run() {
     let coordinator = UsageCoordinator::new();
     let background_coordinator = Arc::clone(&coordinator);
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .manage(AppState { coordinator: Arc::clone(&coordinator) })
         .setup(move |app| {
@@ -827,7 +834,7 @@ pub fn run() {
             thread::spawn(move || loop {
                 let panel = background_coordinator.refresh_all();
                 let _ = handle.emit("usage-updated", panel);
-                thread::sleep(Duration::from_secs(60));
+                thread::sleep(Duration::from_secs(BACKGROUND_REFRESH_SECONDS));
             });
             Ok(())
         })

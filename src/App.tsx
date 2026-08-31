@@ -344,7 +344,7 @@ function SettingsView({
           </div>
         ))}
       </section>
-      <section className="settings-section refresh-setting"><div><span className="setting-label">Refresh interval</span><span className="setting-help">Vast ingesteld voor rustige achtergrondbelasting.</span></div><span className="setting-value">60 seconds</span></section>
+      <section className="settings-section refresh-setting"><div><span className="setting-label">Refresh interval</span><span className="setting-help">Vast ingesteld om Claude niet te overspoelen.</span></div><span className="setting-value">5 minuten</span></section>
       <button className="primary-button settings-save" type="button" onClick={() => void save()} disabled={isSaving}>{isSaving ? "Opslaan…" : "Instellingen opslaan"}</button>
     </main>
   );
