@@ -52,7 +52,7 @@ The browser development fallback renders safe fixture data so the layout can be 
 
 ## Native provider notes
 
-Codex is queried through short-lived `codex app-server --stdio` sessions. The Windows build prefers the native `codex.exe` next to the npm installation, so normal refreshes do not open `cmd.exe`; the `.cmd` launcher is only a last fallback. Claude uses the existing Claude Code OAuth credentials and its compatibility usage endpoint behind `ClaudeUsageProvider`. Provider failures preserve the last valid snapshot and never put provider credentials into React state or the state file.
+Codex is queried through short-lived `codex app-server --stdio` sessions. The Windows build resolves and starts the native `codex.exe` directly, without `where.exe`, `cmd.exe` or a `.cmd` fallback. Codex refreshes are serialized so the two local accounts never start provider sessions at the same time. Claude uses the existing Claude Code OAuth credentials and its compatibility usage endpoint behind `ClaudeUsageProvider`. Provider failures preserve the last valid snapshot and never put provider credentials into React state or the state file.
 
 ## Announcement feed
 
@@ -67,9 +67,14 @@ empty or offline, usage continues unchanged.
 If Codex cannot connect, check the local CLI once in PowerShell:
 
 ```powershell
+Get-Command codex.exe -ErrorAction SilentlyContinue
 codex --version
-where.exe codex.cmd
 codex doctor
 ```
+
+The installed dock itself does not need these commands; they are only a
+diagnostic check. If `codex.exe` is not found, install or update the Codex CLI
+and restart the dock. The dock will show a clear connection error instead of
+opening a console window.
 
 Then restart the dock and use **Connect** for the required Codex account. Codex 1 and Codex 2 have separate local logins.

@@ -183,6 +183,7 @@ struct UsageCoordinator {
     persisted: Mutex<PersistedState>,
     snapshots: Mutex<HashMap<String, UsageSnapshot>>,
     sessions: Mutex<HashMap<String, Arc<Mutex<CodexSessionSlot>>>>,
+    codex_provider_lock: Mutex<()>,
     refreshing: Mutex<HashSet<String>>,
     codex_backoff: Mutex<HashMap<String, BackoffState>>,
     claude_backoff: Mutex<BackoffState>,
@@ -231,6 +232,7 @@ impl UsageCoordinator {
             persisted: Mutex::new(persisted),
             snapshots: Mutex::new(snapshots),
             sessions: Mutex::new(HashMap::new()),
+            codex_provider_lock: Mutex::new(()),
             refreshing: Mutex::new(HashSet::new()),
             codex_backoff: Mutex::new(HashMap::new()),
             claude_backoff: Mutex::new(BackoffState::default()),
@@ -369,6 +371,7 @@ impl UsageCoordinator {
             self.log_event(&format!("{} refresh skipped; already running", account_id));
             return false;
         }
+        let _provider_guard = self.codex_provider_lock.lock().expect("Codex provider lock poisoned");
         let result = self.refresh_codex_inner(account_id);
         self.end_refresh(account_id);
         result
@@ -796,7 +799,7 @@ impl CodexSession {
 
         let mut session = Self { child, stdin, responses, stderr: stderr_buffer, next_id: 1 };
         session.request("initialize", json!({
-            "clientInfo": { "name": "ai-usage-dock", "version": "0.1.5" },
+            "clientInfo": { "name": "ai-usage-dock", "version": env!("CARGO_PKG_VERSION") },
             "capabilities": {}
         }))?;
         session.notify("initialized", json!({}))?;
@@ -891,6 +894,7 @@ fn connect_codex(account_id: String, state: State<'_, AppState>) -> Result<Panel
     if !state.coordinator.begin_refresh(&account_id) {
         return Ok(state.coordinator.panel_state());
     }
+    let _provider_guard = state.coordinator.codex_provider_lock.lock().expect("Codex provider lock poisoned");
     let home = state.coordinator.codex_home(&account_id);
     let mut command = match codex_command(&["login"], &home) {
         Ok(command) => command,
@@ -1209,17 +1213,10 @@ fn resolve_codex_cli() -> Result<PathBuf, String> {
     {
         let mut launchers = Vec::new();
         let mut executables = Vec::new();
-        let where_exe = env::var_os("WINDIR")
-            .map(|windir| PathBuf::from(windir).join("System32").join("where.exe"))
-            .filter(|path| path.is_file())
-            .unwrap_or_else(|| PathBuf::from("where.exe"));
 
-        for executable in ["codex.cmd", "codex.exe"] {
-            if let Ok(output) = Command::new(&where_exe).arg(executable).output() {
-                let output_text = String::from_utf8_lossy(&output.stdout);
-                let paths = output_text.lines().map(PathBuf::from);
-                if executable.ends_with(".cmd") { launchers.extend(paths); } else { executables.extend(paths); }
-            }
+        for directory in env::var_os("PATH").map(|value| env::split_paths(&value).collect::<Vec<_>>()).unwrap_or_default() {
+            launchers.push(directory.join("codex.cmd"));
+            executables.push(directory.join("codex.exe"));
         }
         for variable in ["APPDATA", "LOCALAPPDATA"] {
             if let Some(root) = env::var_os(variable) {
@@ -1228,22 +1225,28 @@ fn resolve_codex_cli() -> Result<PathBuf, String> {
                 executables.push(npm.join("codex.exe"));
             }
         }
-        if let Some(program_files) = env::var_os("ProgramFiles") {
-            let node = PathBuf::from(program_files).join("nodejs");
-            launchers.push(node.join("codex.cmd"));
-            executables.push(node.join("codex.exe"));
+        for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(root) = env::var_os(variable) {
+                let node = PathBuf::from(root).join("nodejs");
+                launchers.push(node.join("codex.cmd"));
+                executables.push(node.join("codex.exe"));
+            }
         }
 
-        for launcher in &launchers {
-            if launcher.is_file() {
-                if let Some(native) = find_native_codex_near_launcher(launcher) {
+        let mut seen = HashSet::new();
+        for launcher in launchers {
+            if launcher.is_file() && seen.insert(launcher.clone()) {
+                if let Some(native) = find_native_codex_near_launcher(&launcher) {
                     return Ok(native);
                 }
             }
         }
-        for executable in executables { if executable.is_file() { return Ok(executable); } }
-        for launcher in launchers { if launcher.is_file() { return Ok(launcher); } }
-        Err("Codex CLI niet gevonden · controleer installatie en PATH".to_string())
+        for executable in executables {
+            if executable.is_file() && seen.insert(executable.clone()) {
+                return Ok(executable);
+            }
+        }
+        Err("Codex native CLI niet gevonden · installeer of update Codex CLI".to_string())
     }
     #[cfg(not(windows))]
     {
@@ -1255,19 +1258,12 @@ fn codex_command(args: &[&str], home: &Path) -> Result<Command, String> {
     let executable = resolve_codex_cli()?;
     #[cfg(windows)]
     {
-        let is_script = executable.extension().and_then(|extension| extension.to_str()).map(|extension| extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")).unwrap_or(false);
-        let mut command = if is_script {
-            let shell = env::var_os("COMSPEC").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("cmd.exe"));
-            let mut command = Command::new(shell);
-            command.args(["/D", "/S", "/C", "call"]).arg(executable).args(args);
-            command
-        } else {
-            let mut command = Command::new(executable);
-            command.args(args);
-            command
-        };
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let mut command = Command::new(executable);
+        command.args(args);
         command.env("CODEX_HOME", home);
-        command.creation_flags(0x08000000);
+        command.creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW);
         Ok(command)
     }
     #[cfg(not(windows))]
