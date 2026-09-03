@@ -547,7 +547,7 @@ impl UsageCoordinator {
         let mut snapshots = self.snapshots.lock().expect("snapshot lock poisoned");
         let previous = snapshots.get(account_id).cloned();
         let label = settings.labels.get(account_id).cloned().unwrap_or_default();
-        let display_name = if !label.trim().is_empty() { label } else if let Some(identity) = identity.clone() { identity } else { account_id.to_string() };
+        let display_name = if !label.trim().is_empty() { label } else { default_display_name(account_id, identity.as_deref()) };
         snapshots.insert(account_id.to_string(), UsageSnapshot {
             provider: if account_id == "claude" { "claude" } else { "codex" }.to_string(),
             account_id: account_id.to_string(),
@@ -601,6 +601,16 @@ impl UsageCoordinator {
     }
 
     fn update_settings(&self, settings: DockSettings) -> PanelState {
+        if let Ok(mut snapshots) = self.snapshots.lock() {
+            for snapshot in snapshots.values_mut() {
+                snapshot.display_name = settings
+                    .labels
+                    .get(&snapshot.account_id)
+                    .filter(|label| !label.trim().is_empty())
+                    .cloned()
+                    .unwrap_or_else(|| default_display_name(&snapshot.account_id, snapshot.account_identity.as_deref()));
+            }
+        }
         if let Ok(mut persisted) = self.persisted.lock() {
             persisted.settings = settings;
             self.persist_snapshots_locked(&mut persisted);
@@ -945,7 +955,7 @@ fn initial_snapshot(account_id: &str, settings: &DockSettings) -> UsageSnapshot 
     UsageSnapshot {
         provider: if account_id == "claude" { "claude" } else { "codex" }.to_string(),
         account_id: account_id.to_string(),
-        display_name: settings.labels.get(account_id).cloned().unwrap_or_else(|| account_id.to_string()),
+        display_name: settings.labels.get(account_id).cloned().filter(|label| !label.trim().is_empty()).unwrap_or_else(|| default_display_name(account_id, None)),
         plan: if account_id == "claude" { "Claude Pro" } else { "ChatGPT Plus" }.to_string(),
         account_identity: None,
         rate_limit_reached_type: None,
@@ -954,6 +964,15 @@ fn initial_snapshot(account_id: &str, settings: &DockSettings) -> UsageSnapshot 
         error: None,
         windows: Vec::new(),
     }
+}
+
+fn default_display_name(account_id: &str, identity: Option<&str>) -> String {
+    identity.filter(|value| !value.trim().is_empty()).map(str::to_string).unwrap_or_else(|| match account_id {
+        "codex-account-1" => "Codex 1".to_string(),
+        "codex-account-2" => "Codex 2".to_string(),
+        "claude" => "Claude".to_string(),
+        _ => account_id.to_string(),
+    })
 }
 
 fn default_announcement_category() -> String {

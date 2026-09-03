@@ -394,14 +394,14 @@ function SettingsView({
         <div className="setting-toggle-row"><div><span className="setting-label">Always on top</span><span className="setting-help">Houd de dock boven andere vensters.</span></div><Toggle checked={draft.alwaysOnTop} onChange={(checked) => setDraft((current) => ({ ...current, alwaysOnTop: checked }))} /></div>
       </section>
       <section className="settings-section">
-        <div className="section-caption">ACCOUNTS</div>
+        <div className="section-caption">ACCOUNTNAMEN</div>
         {snapshots.map((snapshot) => (
           <div className="account-setting-row" key={snapshot.accountId}>
             <label htmlFor={`label-${snapshot.accountId}`}>
               <span className="setting-label">{snapshot.accountId === "claude" ? "Claude" : snapshot.accountId === "codex-account-1" ? "Codex account 1" : "Codex account 2"}</span>
               <span className="setting-help">{snapshot.status === "healthy" ? "Connected" : statusLabel(snapshot.status)}</span>
             </label>
-            <div className="account-setting-controls"><input id={`label-${snapshot.accountId}`} value={draft.labels[snapshot.accountId]} maxLength={24} onChange={(event) => updateLabel(snapshot.accountId, event.target.value)} /><button className="inline-button" type="button" onClick={() => void onReconnect(snapshot.accountId)} disabled={actionAccount === snapshot.accountId}>{actionAccount === snapshot.accountId ? "…" : "Reconnect"}</button></div>
+            <div className="account-setting-controls"><input id={`label-${snapshot.accountId}`} aria-label={`Naam voor ${snapshot.accountId}`} placeholder={snapshot.accountId === "claude" ? "Claude" : snapshot.accountId === "codex-account-1" ? "Codex 1" : "Codex 2"} value={draft.labels[snapshot.accountId] ?? ""} maxLength={24} onChange={(event) => updateLabel(snapshot.accountId, event.target.value)} /><button className="inline-button" type="button" onClick={() => void onReconnect(snapshot.accountId)} disabled={actionAccount === snapshot.accountId}>{actionAccount === snapshot.accountId ? "…" : "Reconnect"}</button></div>
           </div>
         ))}
       </section>
